@@ -31,6 +31,24 @@ func (o *Object) UnmarshalMsgpack(b []byte) error {
 
 //------------------------------------------------------------------------------
 
+type CustomTime time.Time
+
+func (t CustomTime) EncodeMsgpack(enc *msgpack.Encoder) error {
+	return enc.Encode(time.Time(t))
+}
+
+func (t *CustomTime) DecodeMsgpack(dec *msgpack.Decoder) error {
+	var tm time.Time
+	err := dec.Decode(&tm)
+	if err != nil {
+		return err
+	}
+	*t = CustomTime(tm)
+	return nil
+}
+
+//------------------------------------------------------------------------------
+
 type IntSet map[int]struct{}
 
 var _ msgpack.CustomEncoder = (*IntSet)(nil)
@@ -78,11 +96,11 @@ func (s *CustomEncoder) EncodeMsgpack(enc *msgpack.Encoder) error {
 	if s == nil {
 		return enc.EncodeNil()
 	}
-	return enc.Encode(s.str, s.ref, s.num)
+	return enc.EncodeMulti(s.str, s.ref, s.num)
 }
 
 func (s *CustomEncoder) DecodeMsgpack(dec *msgpack.Decoder) error {
-	return dec.Decode(&s.str, &s.ref, &s.num)
+	return dec.DecodeMulti(&s.str, &s.ref, &s.num)
 }
 
 type CustomEncoderField struct {
@@ -136,10 +154,25 @@ type InlinePtrTest struct {
 	*OmitEmptyTest
 }
 
+type FooTest struct {
+	Foo string
+}
+
+type FooDupTest FooTest
+
+type InlineDupTest struct {
+	FooTest
+	FooDupTest
+}
+
 type AsArrayTest struct {
 	_msgpack struct{} `msgpack:",asArray"`
 
 	OmitEmptyTest
+}
+
+type ExtTestField struct {
+	ExtTest ExtTest
 }
 
 //------------------------------------------------------------------------------
@@ -170,8 +203,8 @@ var encoderTests = []encoderTest{
 	},
 
 	{(*Object)(nil), "c0"},
-	{&Object{}, "00"},
-	{&Object{42}, "2a"},
+	{&Object{}, "d30000000000000000"},
+	{&Object{42}, "d3000000000000002a"},
 	{[]*Object{nil, nil}, "92c0c0"},
 
 	{&CustomEncoder{}, "a0c000"},
@@ -183,8 +216,8 @@ var encoderTests = []encoderTest{
 	{OmitEmptyTest{}, "80"},
 	{&OmitEmptyTest{Foo: "hello"}, "81a3466f6fa568656c6c6f"},
 
-	{&InlineTest{OmitEmptyTest: OmitEmptyTest{Bar: "world"}}, "81b14f6d6974456d707479546573742e426172a5776f726c64"},
-	{&InlinePtrTest{OmitEmptyTest: &OmitEmptyTest{Bar: "world"}}, "81b14f6d6974456d707479546573742e426172a5776f726c64"},
+	{&InlineTest{OmitEmptyTest: OmitEmptyTest{Bar: "world"}}, "81a3426172a5776f726c64"},
+	{&InlinePtrTest{OmitEmptyTest: &OmitEmptyTest{Bar: "world"}}, "81a3426172a5776f726c64"},
 
 	{&AsArrayTest{}, "92a0a0"},
 
@@ -194,10 +227,17 @@ var encoderTests = []encoderTest{
 }
 
 func TestEncoder(t *testing.T) {
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf).
+		UseJSONTag(true).
+		SortMapKeys(true).
+		UseCompactEncoding(true)
+
 	for _, test := range encoderTests {
-		var buf bytes.Buffer
-		enc := msgpack.NewEncoder(&buf).UseJSONTag(true).SortMapKeys(true)
-		if err := enc.Encode(test.in); err != nil {
+		buf.Reset()
+
+		err := enc.Encode(test.in)
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -254,10 +294,12 @@ type EmbeddingPtrTest struct {
 	*Exported
 }
 
-//------------------------------------------------------------------------------
-
 type EmbeddedTime struct {
 	time.Time
+}
+
+type Interface struct {
+	Foo interface{}
 }
 
 type (
@@ -379,6 +421,7 @@ var (
 		{in: map[stringAlias]stringAlias{"foo": "bar"}, out: new(map[stringAlias]stringAlias)},
 		{in: mapStringInterface{"foo": "bar"}, out: new(mapStringInterface)},
 		{in: map[stringAlias]interfaceAlias{"foo": "bar"}, out: new(map[stringAlias]interfaceAlias)},
+		{in: map[int]string{1: "string"}, out: new(map[int]string)},
 
 		{in: (*Object)(nil), out: new(*Object)},
 		{in: &Object{42}, out: new(Object)},
@@ -410,8 +453,14 @@ var (
 		{in: time.Unix(0, 1), out: new(time.Time)},
 		{in: time.Unix(1, 0), out: new(time.Time)},
 		{in: time.Unix(1, 1), out: new(time.Time)},
+		{
+			in:     time.Unix(0, 0).Format(time.RFC3339),
+			out:    new(time.Time),
+			wanted: mustParseTime(time.RFC3339, time.Unix(0, 0).Format(time.RFC3339)),
+		},
 		{in: EmbeddedTime{Time: time.Unix(1, 1)}, out: new(EmbeddedTime)},
 		{in: EmbeddedTime{Time: time.Unix(1, 1)}, out: new(*EmbeddedTime)},
+		{in: CustomTime(time.Unix(0, 0)), out: new(CustomTime)},
 
 		{in: nil, out: new(*CustomEncoder), wantnil: true},
 		{in: nil, out: &CustomEncoder{str: "a"}, wantzero: true},
@@ -441,6 +490,24 @@ var (
 
 		{in: (*ExtTest)(nil), out: new(*ExtTest)},
 		{in: &ExtTest{"world"}, out: new(ExtTest), wanted: ExtTest{"hello world"}},
+		{
+			in:     ExtTestField{ExtTest{"world"}},
+			out:    new(ExtTestField),
+			wanted: ExtTestField{ExtTest{"hello world"}},
+		},
+
+		{in: Interface{}, out: &Interface{Foo: "bar"}},
+
+		{
+			in:  &InlineTest{OmitEmptyTest: OmitEmptyTest{Bar: "world"}},
+			out: new(InlineTest),
+		}, {
+			in:  &InlinePtrTest{OmitEmptyTest: &OmitEmptyTest{Bar: "world"}},
+			out: new(InlinePtrTest),
+		}, {
+			in:  InlineDupTest{FooTest{"foo"}, FooDupTest{"foo dup"}},
+			out: new(InlineDupTest),
+		},
 	}
 )
 
@@ -696,18 +763,22 @@ func TestUint64(t *testing.T) {
 		{math.MaxInt64 - 1, "cf7ffffffffffffffe"},
 		{math.MaxInt64, "cf7fffffffffffffff"},
 	}
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf).UseCompactEncoding(true)
+
 	for _, test := range tests {
-		b, err := msgpack.Marshal(test.in)
+		err := enc.Encode(test.in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := hex.EncodeToString(b)
+		s := hex.EncodeToString(buf.Bytes())
 		if s != test.wanted {
 			t.Fatalf("%.32s != %.32s", s, test.wanted)
 		}
 
 		var out uint64
-		err = msgpack.Unmarshal(b, &out)
+		err = msgpack.Unmarshal(buf.Bytes(), &out)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -716,7 +787,7 @@ func TestUint64(t *testing.T) {
 		}
 
 		var out2 int64
-		err = msgpack.Unmarshal(b, &out2)
+		err = msgpack.Unmarshal(buf.Bytes(), &out2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -724,17 +795,21 @@ func TestUint64(t *testing.T) {
 			t.Fatalf("%d != %d", out2, int64(test.in))
 		}
 
-		dec := msgpack.NewDecoder(bytes.NewReader(b))
+		var out3 interface{}
+		out3 = uint64(0)
+		err = msgpack.Unmarshal(buf.Bytes(), &out3)
+		if err.Error() != "msgpack: Decode(nonsettable uint64)" {
+			t.Fatal(err)
+		}
+
+		dec := msgpack.NewDecoder(&buf)
 		_, err = dec.DecodeInterface()
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		var dst interface{}
-		dst = uint64(0)
-		err = msgpack.Unmarshal(b, &dst)
-		if err.Error() != "msgpack: Decode(nonsettable uint64)" {
-			t.Fatal(err)
+		if buf.Len() != 0 {
+			panic("buffer is not empty")
 		}
 	}
 }
@@ -775,18 +850,22 @@ func TestInt64(t *testing.T) {
 		{math.MaxInt64 - 1, "cf7ffffffffffffffe"},
 		{math.MaxInt64, "cf7fffffffffffffff"},
 	}
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf).UseCompactEncoding(true)
+
 	for _, test := range tests {
-		b, err := msgpack.Marshal(test.in)
+		err := enc.Encode(test.in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := hex.EncodeToString(b)
+		s := hex.EncodeToString(buf.Bytes())
 		if s != test.wanted {
 			t.Fatalf("%.32s != %.32s", s, test.wanted)
 		}
 
 		var out int64
-		err = msgpack.Unmarshal(b, &out)
+		err = msgpack.Unmarshal(buf.Bytes(), &out)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -795,7 +874,7 @@ func TestInt64(t *testing.T) {
 		}
 
 		var out2 uint64
-		err = msgpack.Unmarshal(b, &out2)
+		err = msgpack.Unmarshal(buf.Bytes(), &out2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -803,17 +882,21 @@ func TestInt64(t *testing.T) {
 			t.Fatalf("%d != %d", out2, uint64(test.in))
 		}
 
-		dec := msgpack.NewDecoder(bytes.NewReader(b))
+		var out3 interface{}
+		out3 = int64(0)
+		err = msgpack.Unmarshal(buf.Bytes(), &out3)
+		if err.Error() != "msgpack: Decode(nonsettable int64)" {
+			t.Fatal(err)
+		}
+
+		dec := msgpack.NewDecoder(&buf)
 		_, err = dec.DecodeInterface()
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		var dst interface{}
-		dst = int64(0)
-		err = msgpack.Unmarshal(b, &dst)
-		if err.Error() != "msgpack: Decode(nonsettable int64)" {
-			t.Fatal(err)
+		if buf.Len() != 0 {
+			panic("buffer is not empty")
 		}
 	}
 }
@@ -957,4 +1040,12 @@ func TestFloat64(t *testing.T) {
 	if !math.IsNaN(out) {
 		t.Fatal("not NaN")
 	}
+}
+
+func mustParseTime(format, s string) time.Time {
+	tm, err := time.Parse(format, s)
+	if err != nil {
+		panic(err)
+	}
+	return tm
 }

@@ -32,8 +32,8 @@ func makeBuffer() []byte {
 
 // Unmarshal decodes the MessagePack-encoded data and stores the result
 // in the value pointed to by v.
-func Unmarshal(data []byte, v ...interface{}) error {
-	return NewDecoder(bytes.NewReader(data)).Decode(v...)
+func Unmarshal(data []byte, v interface{}) error {
+	return NewDecoder(bytes.NewReader(data)).Decode(v)
 }
 
 type Decoder struct {
@@ -57,8 +57,6 @@ type Decoder struct {
 // by passing a reader that implements io.ByteScanner interface.
 func NewDecoder(r io.Reader) *Decoder {
 	d := &Decoder{
-		decodeMapFunc: decodeMap,
-
 		buf: makeBuffer(),
 	}
 	d.resetReader(r)
@@ -93,18 +91,9 @@ func (d *Decoder) resetReader(r io.Reader) {
 	d.s = reader
 }
 
-func (d *Decoder) Decode(v ...interface{}) error {
-	for _, vv := range v {
-		if err := d.decode(vv); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *Decoder) decode(dst interface{}) error {
+func (d *Decoder) Decode(v interface{}) error {
 	var err error
-	switch v := dst.(type) {
+	switch v := v.(type) {
 	case *string:
 		if v != nil {
 			*v, err = d.DecodeString()
@@ -198,21 +187,30 @@ func (d *Decoder) decode(dst interface{}) error {
 		}
 	}
 
-	v := reflect.ValueOf(dst)
-	if !v.IsValid() {
+	vv := reflect.ValueOf(v)
+	if !vv.IsValid() {
 		return errors.New("msgpack: Decode(nil)")
 	}
-	if v.Kind() != reflect.Ptr {
-		return fmt.Errorf("msgpack: Decode(nonsettable %T)", dst)
+	if vv.Kind() != reflect.Ptr {
+		return fmt.Errorf("msgpack: Decode(nonsettable %T)", v)
 	}
-	v = v.Elem()
-	if !v.IsValid() {
-		return fmt.Errorf("msgpack: Decode(nonsettable %T)", dst)
+	vv = vv.Elem()
+	if !vv.IsValid() {
+		return fmt.Errorf("msgpack: Decode(nonsettable %T)", v)
 	}
-	return d.DecodeValue(v)
+	return d.DecodeValue(vv)
 }
 
-func (d *Decoder) decodeInterface() (interface{}, error) {
+func (d *Decoder) DecodeMulti(v ...interface{}) error {
+	for _, vv := range v {
+		if err := d.Decode(vv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Decoder) decodeInterfaceCond() (interface{}, error) {
 	if d.useLoose {
 		return d.DecodeInterfaceLoose()
 	}
@@ -265,7 +263,7 @@ func (d *Decoder) bool(c codes.Code) (bool, error) {
 	return false, fmt.Errorf("msgpack: invalid code=%x decoding bool", c)
 }
 
-// DecodeInterface decodes value into interface. Possible value types are:
+// DecodeInterface decodes value into interface. It returns following types:
 //   - nil,
 //   - bool,
 //   - int8, int16, int32, int64,
@@ -275,6 +273,10 @@ func (d *Decoder) bool(c codes.Code) (bool, error) {
 //   - []byte,
 //   - slices of any of the above,
 //   - maps of any of the above.
+//
+// DecodeInterface should be used only when you don't know the type of value
+// you are decoding. For example, if you are decoding number it is better to use
+// DecodeInt64 for negative numbers and DecodeUint64 for positive numbers.
 func (d *Decoder) DecodeInterface() (interface{}, error) {
 	c, err := d.readCode()
 	if err != nil {
@@ -285,7 +287,10 @@ func (d *Decoder) DecodeInterface() (interface{}, error) {
 		return int8(c), nil
 	}
 	if codes.IsFixedMap(c) {
-		d.s.UnreadByte()
+		err = d.s.UnreadByte()
+		if err != nil {
+			return nil, err
+		}
 		return d.DecodeMap()
 	}
 	if codes.IsFixedArray(c) {
@@ -327,7 +332,10 @@ func (d *Decoder) DecodeInterface() (interface{}, error) {
 	case codes.Array16, codes.Array32:
 		return d.decodeSlice(c)
 	case codes.Map16, codes.Map32:
-		d.s.UnreadByte()
+		err = d.s.UnreadByte()
+		if err != nil {
+			return nil, err
+		}
 		return d.DecodeMap()
 	case codes.FixExt1, codes.FixExt2, codes.FixExt4, codes.FixExt8, codes.FixExt16,
 		codes.Ext8, codes.Ext16, codes.Ext32:
@@ -351,7 +359,10 @@ func (d *Decoder) DecodeInterfaceLoose() (interface{}, error) {
 		return int64(c), nil
 	}
 	if codes.IsFixedMap(c) {
-		d.s.UnreadByte()
+		err = d.s.UnreadByte()
+		if err != nil {
+			return nil, err
+		}
 		return d.DecodeMap()
 	}
 	if codes.IsFixedArray(c) {
@@ -379,7 +390,10 @@ func (d *Decoder) DecodeInterfaceLoose() (interface{}, error) {
 	case codes.Array16, codes.Array32:
 		return d.decodeSlice(c)
 	case codes.Map16, codes.Map32:
-		d.s.UnreadByte()
+		err = d.s.UnreadByte()
+		if err != nil {
+			return nil, err
+		}
 		return d.DecodeMap()
 	case codes.FixExt1, codes.FixExt2, codes.FixExt4, codes.FixExt8, codes.FixExt16,
 		codes.Ext8, codes.Ext16, codes.Ext32:
